@@ -1,0 +1,19 @@
+{
+    "controls": {
+      // "Lighting" 控制钢铁侠能源核心上的灯光
+      "Lighting": {
+        "operation": "switchLight", // 定义操作为切换灯光
+        "parameters": {
+          "status": "on" // 参数 "status" 控制灯光状态，"on" 为开启，"off" 为关闭
+        }
+      },
+      // "NuclearFusion" 控制钢铁侠能源核心的核聚变反应
+      "NuclearFusion": {
+        "operation": "activateFusion", // 定义操作为激活或停止核聚变
+        "parameters": {
+          "status": "start" // 参数 "status" 控制核聚变状态，"start" 为激活，"stop" 为停止
+        }
+      }
+    }
+  }
+  
