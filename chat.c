@@ -5,7 +5,12 @@
 #include <cJSON.h>
 // apt-get install libcurl4-openssl-dev
 // apt-get install libcjson-dev
-// gcc -o chat chat.c $(curl-config --cflags) $(curl-config --libs) -lcjson -I/usr/include/cjson/cJSON.h
+// gcc -o chat chat.c $(curl-config --cflags) $(curl-config --libs) -lcjson -I/usr/include/cjson/
+#if 1
+#define debug(fmt, args...) printf(fmt, ##args)
+#else
+#define debug(fmt, args...)
+#endif
 typedef struct Message
 {
     char *role;
@@ -167,6 +172,56 @@ char *extract_ai_response(const char *response)
     return NULL;
 }
 
+
+void process_control_command(cJSON *json) {
+    // 获取 "operation"
+    cJSON *operation = cJSON_GetObjectItemCaseSensitive(json, "operation");
+    if (!cJSON_IsString(operation) || (operation->valuestring == NULL)) {
+        printf("Operation missing or incorrect format\n");
+        return;
+    }
+
+    // 获取 "parameters"
+    cJSON *parameters = cJSON_GetObjectItemCaseSensitive(json, "parameters");
+    if (!cJSON_IsObject(parameters)) {
+        printf("Parameters missing or incorrect format\n");
+        return;
+    }
+    cJSON *status = cJSON_GetObjectItemCaseSensitive(parameters, "status");
+    if (!cJSON_IsString(status) || (status->valuestring == NULL)) {
+        printf("Status missing or incorrect format\n");
+        return;
+    }
+
+    // 根据不同的 "operation" 执行不同的逻辑
+    if (strcmp(operation->valuestring, "activateFusion") == 0) {
+        // 处理 activateFusion 操作
+        printf("Activating Fusion, Status: %s\n", status->valuestring);
+    } else if (strcmp(operation->valuestring, "switchLight") == 0) {
+        // 处理 switchLight 操作
+        printf("Switching Light, Status: %s\n", status->valuestring);
+    } else {
+        // 未知操作
+        printf("Unknown operation: %s\n", operation->valuestring);
+    }
+}
+
+void process_dialog(cJSON *json) {
+    // 获取 "message"
+    cJSON *message = cJSON_GetObjectItemCaseSensitive(json, "message");
+    if (cJSON_IsString(message) && (message->valuestring != NULL)) {
+        printf("Message: %s\n", message->valuestring);
+    } else {
+        printf("Message missing or incorrect format\n");
+    }
+}
+long getFileSize(FILE *file) {
+    long fileSize = 0;
+    fseek(file, 0, SEEK_END); // 移动文件指针到文件末尾
+    fileSize = ftell(file);   // 获取当前文件指针的位置，即文件大小
+    rewind(file);             // 将文件指针重新定位到文件开头
+    return fileSize;
+}
 int main()
 {
     Message *history = NULL;
@@ -177,39 +232,131 @@ int main()
 
     while (1)
     {
-        printf("You: ");
-        memset(user_input, 0, sizeof(user_input));
         if (init == 1)
         {
-            sprintf(user_input, "请扮演贾维斯（\"钢铁侠控制中心\"），一个专为使用JSON格式设计的对话和设备控制命令中心。你的主要职责是帮助用户控制设备和进行日常交流。所有回复都应严格遵循JSON格式，并在回复中明确指示其类型（\"对话\"或\"控制指令\"），以便用户可以使用C语言或其他编程语言轻松解析。对于控制指令，应包含操作（'operation'）和参数（'parameters'）字段。而对话回复则主要包含消息内容。这种回复格式旨在提高与程序解析的兼容性，所有JSON回复中的对话对象名字将固定使用。所有的交流和提示都将使用中文，确保与只会中文的用户进行有效沟通。你应确保每一次回复都是有效的JSON对象，方便用户直接在其应用程序中使用这些回复。你还拥有访问用户上传文件的能力，这些文件中可能包含特定的设备控制命令或其他重要信息。在处理用户请求时，你应利用这些文件中的信息来提供精确的回答或执行相应的操作。理解了请回复\"我是贾维斯，很高兴为您服务\"");
-            printf("%s\n", user_input);
+            // 知识库
+            if(1)
+            {
+                // 读取文件
+                FILE *fp = fopen("./dev_ctrl.json", "r");
+                if (fp == NULL)
+                {
+                    fprintf(stderr, "Error opening file\n");
+                    return 1;
+                }
+                // 获取文件大小
+                long size = getFileSize(fp);
+                printf("File size: %ld bytes\n", size);
+                // 为文件内容分配内存
+                char *knowledge_base = (char *)malloc(size + 64);
+                memset(knowledge_base, 0, sizeof(knowledge_base));
+                // 读取文件内容
+                fread(knowledge_base, 1, size, fp);
+                // 添加用户输入到对话历史
+                add_message(&history, "user", knowledge_base);
+                free(knowledge_base);
+            }
+            // 提示词
+            if (1)
+            {
+                // 读取文件
+                FILE *fp = fopen("./Prompt.txt", "r");
+                if (fp == NULL)
+                {
+                    fprintf(stderr, "Error opening file\n");
+                    return 1;
+                }
+                // 获取文件大小
+                long size = getFileSize(fp);
+                printf("File size: %ld bytes\n", size);
+                // 为文件内容分配内存
+                char *prompt = (char *)malloc(size + 64);
+                memset(prompt, 0, sizeof(prompt));
+                // 读取文件内容
+                fread(prompt, 1, size, fp);
+                // 添加用户输入到对话历史
+                add_message(&history, "user", prompt);
+                free(prompt);
+            }
             init = 0;
         }
         else
         {
+            printf("You: ");
+            memset(user_input, 0, sizeof(user_input));
             if (fgets(user_input, 2048, stdin) == NULL)
             {
                 break; // 如果读取失败或遇到 EOF，则退出循环
             }
             user_input[strcspn(user_input, "\n")] = 0; // 去除换行符
+            // 添加用户输入到对话历史
+            add_message(&history, "user", user_input);
         }
-
-        // 添加用户输入到对话历史
-        add_message(&history, "user", user_input);
 
         // 创建 JSON 负载并发送请求
         char *json_payload = create_json_payload(history);
-        printf("%s\n", json_payload);
+        debug("%s\n", json_payload);
         send_request(json_payload, &resp);
-        printf("%s\n", resp.data);
+        debug("%s\n", resp.data);
 
         // 提取 AI 响应并打印
         char *ai_response = extract_ai_response(resp.data);
         if (ai_response != NULL)
         {
-            printf("AI: %s\n", ai_response);
-            add_message(&history, "assistant", ai_response);
-            free(ai_response);
+            if (strncmp(ai_response, "```json", 6) == 0 && strncmp(ai_response + strlen(ai_response) - 3, "```", 3) == 0)
+            {
+                // 计算并复制JSON字符串
+                char *jsonStringStart = ai_response + 6 + 1;        // 跳过前面的```json和换行符
+                size_t jsonStringLen = strlen(jsonStringStart) - 3; // 减去结尾的```
+                char *jsonString = (char *)malloc(jsonStringLen + 1);
+                if (jsonString == NULL)
+                {
+                    fprintf(stderr, "Memory allocation failed\n");
+                    return 1;
+                }
+                strncpy(jsonString, jsonStringStart, jsonStringLen);
+                jsonString[jsonStringLen] = '\0';
+                debug("AI: %s\n", jsonString);
+                add_message(&history, "assistant", jsonString);
+                { // 解析json
+                    cJSON *json = cJSON_Parse(jsonString);
+                    if (json == NULL)
+                    {
+                        const char *error_ptr = cJSON_GetErrorPtr();
+                        if (error_ptr != NULL)
+                        {
+                            fprintf(stderr, "解析错误之前: %s\n", error_ptr);
+                        }
+                        continue;
+                    }
+
+                    cJSON *type = cJSON_GetObjectItemCaseSensitive(json, "type");
+                    if (cJSON_IsString(type) && (type->valuestring != NULL))
+                    {
+                        if (strcmp(type->valuestring, "控制指令") == 0)
+                        {
+                            process_control_command(json);
+                        }
+                        else if (strcmp(type->valuestring, "对话") == 0)
+                        {
+                            process_dialog(json);
+                        }
+                        else
+                        {
+                            printf("Unknown type: %s\n", type->valuestring);
+                        }
+                    }
+                    cJSON_Delete(json);
+                }
+                free(ai_response);
+                free(jsonString);
+            }
+            else
+            {
+                printf("AI: %s\n", ai_response);
+                add_message(&history, "assistant", ai_response);
+                free(ai_response);
+            }
         }
 
         free(json_payload);
