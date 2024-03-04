@@ -4,66 +4,111 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"sync"
 
 	"github.com/sashabaranov/go-openai"
+	"github.com/sashabaranov/go-openai/jsonschema"
 )
 
 var (
 	OpenAIToken = os.Getenv("OPENAI_TOKEN")
-	messages    = make([]openai.ChatCompletionMessage, 0)
 	client      = openai.NewClient(OpenAIToken)
 )
 
 func main() {
 	ctx := context.Background()
+	messages := make([]openai.ChatCompletionMessage, 0)
 	messages = append(messages, openai.ChatCompletionMessage{
 		Role:    openai.ChatMessageRoleSystem,
 		Content: "Don't make assumptions about what values to plug into functions. Ask for clarification if a user request is ambiguous.",
 	})
-	for {
-		var userInput string
-		fmt.Printf("%s: ", openai.ChatMessageRoleUser)
-		fmt.Scanln(&userInput)
-		userMsg := openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleUser,
-			Content: userInput,
+
+	inputChan := make(chan string)
+	responseChan := make(chan openai.ChatCompletionMessage)
+	doneChan := make(chan bool) // 用于同步处理完成的信号
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			var userInput string
+			fmt.Printf("User: ")
+			fmt.Scanln(&userInput)
+			if userInput == "exit" {
+				close(inputChan) // 关闭channel以通知主线程退出
+				return
+			}
+			inputChan <- userInput
+			<-doneChan // 等待处理完成的信号
 		}
-		respMsg := handleRequest(ctx, userMsg)
-		printMsg(respMsg)
-		messages = append(messages, respMsg)
-	}
+	}()
+
+	// 处理请求goroutine
+	wg.Add(1)
+	go func(ctx context.Context, inputChan <-chan string, responseChan chan<- openai.ChatCompletionMessage) {
+		defer wg.Done()
+		messages := make([]openai.ChatCompletionMessage, 0)
+		for userInput := range inputChan {
+			userMsg := openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleUser,
+				Content: userInput,
+			}
+			respMsg := handleRequest(ctx, userMsg, messages)
+			messages = append(messages, userMsg, respMsg)
+			responseChan <- respMsg
+		}
+		close(responseChan)
+	}(ctx, inputChan, responseChan)
+
+	// 打印响应
+	go func(responseChan <-chan openai.ChatCompletionMessage) {
+		for respMsg := range responseChan {
+			printMsg(respMsg)
+			doneChan <- true // 发送处理完成的信号
+		}
+	}(responseChan)
+
+	wg.Wait()
 }
 
-func handleRequest(ctx context.Context, msg openai.ChatCompletionMessage) openai.ChatCompletionMessage {
-	messages = append(messages, msg)
-	funcs := functions()
-	req := openai.ChatCompletionRequest{
-		Model:     openai.GPT3Dot5Turbo0613,
-		Functions: funcs,
-		Messages:  messages,
+func handleRequest(ctx context.Context, initialMsg openai.ChatCompletionMessage, messages []openai.ChatCompletionMessage) openai.ChatCompletionMessage {
+	var lastMsg openai.ChatCompletionMessage = initialMsg
+
+	for {
+		messages = append(messages, lastMsg)
+		funcs := functions()
+		req := openai.ChatCompletionRequest{
+			Model:     openai.GPT3Dot5Turbo0613,
+			Functions: funcs,
+			Messages:  messages,
+		}
+		resp, err := client.CreateChatCompletion(ctx, req)
+		if err != nil {
+			panic(err)
+		}
+		// 处理响应，如果没有函数调用则跳出循环
+		choice := resp.Choices[0]
+		msg := choice.Message
+		if msg.FunctionCall == nil {
+			return msg
+		} else {
+			lastMsg = handleResponse(ctx, &resp)
+		}
 	}
-	resp, err := client.CreateChatCompletion(ctx, req)
-	if err != nil {
-		panic(err)
-	}
-	return handleResponse(ctx, &resp)
 }
 
 func handleResponse(ctx context.Context, resp *openai.ChatCompletionResponse) openai.ChatCompletionMessage {
 	choice := resp.Choices[0]
 	msg := choice.Message
-	if msg.FunctionCall == nil {
-		return msg
-	}
 	printMsg(msg)
-	// 处理函数
+	// 处理函数调用逻辑
 	callInfo := msg.FunctionCall
 	var funcResp string
 	switch callInfo.Name {
 	case "getBotInfo":
 		funcResp = getBotInfo()
-	case "getWalletBalance":
-		funcResp = getWalletBalance(callInfo.Arguments)
 	case "intent_system_charger":
 		funcResp = intent_system_charger(callInfo.Arguments)
 	case "intent_system_sleep":
@@ -77,7 +122,80 @@ func handleResponse(ctx context.Context, resp *openai.ChatCompletionResponse) op
 		Name:    callInfo.Name,
 	}
 	printMsg(funcMsg)
-	return handleRequest(ctx, funcMsg)
+	return funcMsg
+}
+
+func printMsg(msg openai.ChatCompletionMessage) {
+	role := msg.Role
+	content := msg.Content
+	if content == "" {
+		contentBytes, _ := json.Marshal(msg)
+		content = string(contentBytes)
+	}
+	fmt.Printf("%s: %s\n", role, content)
+}
+
+func functions() []openai.FunctionDefinition {
+	return []openai.FunctionDefinition{
+		{
+			Name:        "getBotInfo",
+			Description: "获取机器人信息，在打招呼或自我介绍时可使用此函数获取名称以及功能",
+			Parameters: &jsonschema.Definition{
+				Type: "object",
+				Properties: map[string]jsonschema.Definition{
+					"id": {
+						Type:        jsonschema.String,
+						Description: "gpt模型自动生成的id",
+					},
+				},
+			},
+		},
+		{
+			Name:        "intent_system_charger",
+			Description: "控制vector回到充电桩充电",
+			Parameters: &jsonschema.Definition{
+				Type: "object",
+				Properties: map[string]jsonschema.Definition{
+					"keyphrases": {
+						Type:        jsonschema.String,
+						Description: "执行的指令关键词",
+						Enum:        []string{"回家", "充电"},
+					},
+				},
+				Required: []string{"keyphrases"},
+			},
+		},
+		{
+			Name:        "intent_system_sleep",
+			Description: "控制vector进入休眠状态",
+			Parameters: &jsonschema.Definition{
+				Type: "object",
+				Properties: map[string]jsonschema.Definition{
+					"keyphrases": {
+						Type:        jsonschema.String,
+						Description: "执行的指令关键词",
+						Enum:        []string{"睡吧", "睡觉"},
+					},
+				},
+				Required: []string{"keyphrases"},
+			},
+		},
+		{
+			Name:        "intent_imperative_forward",
+			Description: "控制vector前进",
+			Parameters: &jsonschema.Definition{
+				Type: "object",
+				Properties: map[string]jsonschema.Definition{
+					"keyphrases": {
+						Type:        jsonschema.String,
+						Description: "执行的指令关键词",
+						Enum:        []string{"向前", "往前"},
+					},
+				},
+				Required: []string{"keyphrases"},
+			},
+		},
+	}
 }
 
 func getBotInfo() string {
@@ -93,139 +211,15 @@ func getBotInfo() string {
 }
 
 func intent_system_charger(body string) string {
-	args := make(map[string]string)
-	_ = json.Unmarshal([]byte(body), &args)
-	keyphrases := args["keyphrases"]
-	if keyphrases == "回家" {
-		return "已经在家了"
-	}
-	return "已经在充电了"
+	fmt.Printf("参数: %s\n", body)
+	return "正在去往充电桩"
 }
 
 func intent_system_sleep(body string) string {
-	args := make(map[string]string)
-	_ = json.Unmarshal([]byte(body), &args)
-	keyphrases := args["keyphrases"]
-	if keyphrases == "睡吧" {
-		return "已经在睡觉了"
-	}
-	return "已经在休息了"
+	fmt.Printf("参数: %s\n", body)
+	return "已经在睡觉了"
 }
 func intent_imperative_forward(body string) string {
-	args := make(map[string]string)
-	_ = json.Unmarshal([]byte(body), &args)
-	keyphrases := args["keyphrases"]
-	if keyphrases == "向前" {
-		return "正在前进"
-	}
+	fmt.Printf("参数: %s\n", body)
 	return "正在往前走"
-}
-func getWalletBalance(body string) string {
-	args := make(map[string]string)
-	_ = json.Unmarshal([]byte(body), &args)
-	userId := args["userId"]
-	var balance int
-	var name string
-	switch userId {
-	case "lisi":
-		balance = 10000
-		name = "李四"
-	case "zhangsan":
-		balance = 20000
-		name = "张三"
-	}
-	resp := map[string]interface{}{
-		"balance": balance,
-		"user":    name,
-	}
-	b, _ := json.Marshal(resp)
-	return string(b)
-}
-
-func printMsg(msg openai.ChatCompletionMessage) {
-	role := msg.Role
-	content := msg.Content
-	if content == "" {
-		contentBytes, _ := json.Marshal(msg)
-		content = string(contentBytes)
-	}
-	fmt.Printf("%s: %s\n", role, content)
-}
-
-func functions() []*openai.FunctionDefine {
-	return []*openai.FunctionDefine{
-		{
-			Name:        "getBotInfo",
-			Description: "获取机器人信息，在打招呼或自我介绍时可使用此函数获取名称以及功能",
-			Parameters: &openai.FunctionParams{
-				Type: "object",
-				// 因为Properties不传接口会报错，传空map序列化后会忽略，所以这里传了一个无所谓的参数占位，解决序列化问题后可不传参数
-				Properties: map[string]*openai.JSONSchemaDefine{
-					"id": {
-						Type:        "string",
-						Description: "gpt模型自动生成的id",
-					},
-				},
-			},
-		},
-		{
-			Name:        "getWalletBalance",
-			Description: "查询用户钱包余额",
-			Parameters: &openai.FunctionParams{
-				Type: "object",
-				Properties: map[string]*openai.JSONSchemaDefine{
-					"userId": {
-						Type:        "string",
-						Description: "用户id",
-					},
-				},
-				Required: []string{"userId"},
-			},
-		},
-		{
-			Name:        "intent_system_charger",
-			Description: "控制vector回到充电桩充电",
-			Parameters: &openai.FunctionParams{
-				Type: "object",
-				Properties: map[string]*openai.JSONSchemaDefine{
-					"keyphrases": {
-						Type:        "string",
-						Description: "执行的指令关键词",
-						Enum:        []string{"回家", "充电"},
-					},
-				},
-				Required: []string{"keyphrases"},
-			},
-		},
-		{
-			Name:        "intent_system_sleep",
-			Description: "控制vector进入休眠状态",
-			Parameters: &openai.FunctionParams{
-				Type: "object",
-				Properties: map[string]*openai.JSONSchemaDefine{
-					"keyphrases": {
-						Type:        "string",
-						Description: "执行的指令关键词",
-						Enum:        []string{"睡吧", "睡觉"},
-					},
-				},
-				Required: []string{"keyphrases"},
-			},
-		},
-		{
-			Name:        "intent_imperative_forward",
-			Description: "控制vector前进",
-			Parameters: &openai.FunctionParams{
-				Type: "object",
-				Properties: map[string]*openai.JSONSchemaDefine{
-					"keyphrases": {
-						Type:        "string",
-						Description: "执行的指令关键词",
-						Enum:        []string{"向前", "往前"},
-					},
-				},
-				Required: []string{"keyphrases"},
-			},
-		},
-	}
 }
